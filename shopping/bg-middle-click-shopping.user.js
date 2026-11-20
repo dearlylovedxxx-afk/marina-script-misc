@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         商品画像をホイールクリックでバックグラウンドタブへ (Amazon / SHEIN)
 // @namespace    https://chatgpt.com/userscripts/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Amazon・SHEINの商品画像／商品カードをホイールクリックして、元のページを残したまま背景タブで開きます。
 // @match        https://www.amazon.co.jp/*
 // @match        https://amazon.co.jp/*
 // @match        https://*.amazon.co.jp/*
 // @match        https://*.shein.com/*
+// @updateURL    https://raw.githubusercontent.com/dearlylovedxxx-afk/marina-script-misc/main/shopping/bg-middle-click-shopping.user.js
+// @downloadURL  https://raw.githubusercontent.com/dearlylovedxxx-afk/marina-script-misc/main/shopping/bg-middle-click-shopping.user.js
 // @run-at       document-start
 // @noframes
 // @grant        GM_openInTab
@@ -17,7 +19,7 @@
 
   const host = location.hostname.toLowerCase();
   const isAmazon = host === 'amazon.co.jp' || host.endsWith('.amazon.co.jp');
-  const isShein = host.endsWith('.shein.com');
+  const isShein = host === 'shein.com' || host.endsWith('.shein.com');
   if (!isAmazon && !isShein) return;
 
   const EXCLUDE = 'button, input, select, textarea, [contenteditable="true"], [role="button"], [class*="wishlist"], [class*="favorite"], [class*="quick-add"], [class*="quickAdd"]';
@@ -43,7 +45,7 @@
       const url = new URL(value, location.href);
       if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
       if (isAmazon && !(url.hostname === 'amazon.co.jp' || url.hostname.endsWith('.amazon.co.jp'))) return null;
-      if (isShein && !url.hostname.endsWith('.shein.com')) return null;
+      if (isShein && !(url.hostname === 'shein.com' || url.hostname.endsWith('.shein.com'))) return null;
       return url.href;
     } catch (_) {
       return null;
@@ -101,12 +103,21 @@
 
   function sheinUrl(target) {
     const directHref = ancestorLink(target);
-    const directProduct = productLink(directHref, 'shein');
-    if (directProduct) return directProduct;
-
-    // Other real links (categories, promos, etc.) are not product links.
+    // Ordinary links already support native middle-click; do not interfere.
     if (absoluteUrl(directHref)) return null;
     if (target.closest(EXCLUDE)) return null;
+
+    // SHEIN uses <a href="javascript:void(0)" data-id="GOODS_ID" ...>
+    // for image links. The data-id is on the ANCHOR, not necessarily the card.
+    const clickedLink = target.closest('a[data-id], a[data-goods-id], a[data-goods_id], a[data-goodsid]');
+    const looksLikeProduct = clickedLink && (
+      clickedLink.matches('[data-spu], [data-sku], [data-title]') ||
+      /(?:S-product-card|product-item-img|goods-item-img|goods-card|product-image)/i.test(clickedLink.className || '')
+    );
+    if (looksLikeProduct) {
+      const id = readSheinId(clickedLink, true);
+      if (id) return sheinProductUrl(id);
+    }
 
     let card = target.closest(SHEIN_CARD);
     if (!card) {
@@ -143,20 +154,25 @@
       if (match) return match;
     }
 
-    // SHEIN product URLs normally have the form .../Product-p-GOODS_ID.html.
-    // Do NOT use a bare SKU or arbitrary ID from an unrelated element.
-    let goodsId = readSheinId(card, true);
+    // The ID may live on an inner image anchor (common on SHEIN).
+    const innerProductLink = card.querySelector(
+      'a[data-id][data-spu], a[data-id][data-sku], a[data-id][class*="product-card"], a[data-goods-id], a[data-goods_id]'
+    );
+    let goodsId = readSheinId(innerProductLink, true) || readSheinId(card, true);
     if (!goodsId) {
       let el = target;
       while (el && card.contains(el)) {
-        goodsId = readSheinId(el, false);
+        goodsId = readSheinId(el, true);
         if (goodsId || el === card) break;
         el = el.parentElement;
       }
     }
-    if (!goodsId) return null;
-    const sheinDomain = host === 'm.shein.com' ? 'jp.shein.com' : host;
-    return `https://${sheinDomain}/Product-p-${goodsId}.html`;
+    return goodsId ? sheinProductUrl(goodsId) : null;
+  }
+
+  function sheinProductUrl(goodsId) {
+    const domain = host === 'm.shein.com' ? 'jp.shein.com' : host;
+    return `https://${domain}/Product-p-${goodsId}.html`;
   }
 
   function targetUrl(event) {
@@ -166,24 +182,26 @@
     return isAmazon ? amazonUrl(target) : sheinUrl(target);
   }
 
-  // Catch the site's own middle-mouse handlers early without changing left/right clicks.
-  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-    document.addEventListener(type, event => {
-      if (!targetUrl(event)) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-    }, true);
-  }
-
-  document.addEventListener('auxclick', event => {
+  // Open on mousedown: some sites intercept the later auxclick event.
+  // Capturing on window runs before document-level page handlers.
+  window.addEventListener('mousedown', event => {
     const url = targetUrl(event);
-    if (!url) return;   // Leave unknown targets untouched.
+    if (!url) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     try {
       GM_openInTab(url, { active: false, insert: true, setParent: true });
     } catch (error) {
-      console.error('[BG Middle Click] Could not open a background tab:', error);
+      console.error('[BG Middle Click] Failed to open a background tab:', error);
     }
   }, true);
+
+  // Avoid native autoscroll and a duplicate site-initiated navigation.
+  for (const type of ['mouseup', 'auxclick']) {
+    window.addEventListener(type, event => {
+      if (!targetUrl(event)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
 })();
